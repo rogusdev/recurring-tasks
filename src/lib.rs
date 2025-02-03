@@ -1,38 +1,48 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
-
-use futures::future::join_all;
+use std::time::{Duration, Instant, SystemTime};
 
 use tracing::{debug, warn};
 
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Instant};
+use tokio::time::sleep;
 use tokio::{select, signal, spawn};
 
 /// Trait for tasks that can be run asynchronously, with the Task Manager
 #[async_trait::async_trait]
 pub trait AsyncTask: Send + Sync {
+    /// The actual async task / work
     async fn run(&self) -> Result<(), String>;
+    /// A name for logging
     fn name(&self) -> &str;
+    /// The period/interval for this task to run on
     fn interval(&self) -> Duration;
 }
 
-/// Holds a single user task and a record of when it started (if running)
+/// Holds a single user task, when it started (if running), and when it should next run
 struct ManagedTask {
     task: Arc<dyn AsyncTask>,
     started_at: Option<SystemTime>,
+    next_run: Instant,
 }
 
 impl ManagedTask {
-    pub fn started_at(&self) -> Option<SystemTime> {
+    fn new(task: Arc<dyn AsyncTask>) -> Self {
+        Self {
+            task,
+            started_at: None,
+            next_run: Instant::now(),
+        }
+    }
+
+    fn started_at(&self) -> Option<SystemTime> {
         self.started_at
     }
 
-    pub fn start(&mut self) {
+    fn start(&mut self) {
         self.started_at = Some(SystemTime::now());
     }
 
-    pub fn stop(&mut self) {
+    fn stop(&mut self) {
         self.started_at = None;
     }
 }
@@ -41,12 +51,21 @@ impl ManagedTask {
 #[derive(Clone)]
 pub struct TaskManager {
     tasks: Arc<Mutex<Vec<Arc<Mutex<ManagedTask>>>>>,
+    /// How often should the manager check for new tasks to run
+    scheduler_tick: Duration,
+}
+
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new(500)
+    }
 }
 
 impl TaskManager {
-    pub fn new() -> Self {
+    pub fn new(millis: u64) -> Self {
         TaskManager {
             tasks: Arc::new(Mutex::new(Vec::new())),
+            scheduler_tick: Duration::from_millis(millis),
         }
     }
 
@@ -56,85 +75,69 @@ impl TaskManager {
     {
         let mut tasks = self.tasks.lock().await;
 
-        let managed = ManagedTask {
-            task: Arc::new(task),
-            started_at: None,
-        };
-
+        let managed = ManagedTask::new(Arc::new(task));
         tasks.push(Arc::new(Mutex::new(managed)));
     }
 
     pub async fn run(&self) {
         debug!("Initializing Recurring Task Manager");
-        let tasks = self.tasks.lock().await;
-        let mut handles = Vec::new();
+        for managed_task in self.tasks.lock().await.iter() {
+            let mut managed = managed_task.lock().await;
 
-        // TODO: maybe just calculate time between each task and sleep until then?
-        for managed_task in tasks.iter().cloned() {
-            warn!("Spawning task");
-            let handle = spawn(async move {
-                let (task_name, task_interval) = {
-                    let managed = managed_task.lock().await;
-                    (managed.task.name().to_owned(), managed.task.interval())
-                };
+            let initial_delay = calculate_initial_delay(managed.task.interval());
 
-                // Calculate the initial delay to align with the desired schedule
-                let initial_delay = calculate_initial_delay(task_interval);
-                debug!("Sleep {:?} to start task {task_name}", initial_delay);
-                sleep(initial_delay).await;
+            debug!(
+                "Starting task {} in {} s",
+                managed.task.name(),
+                initial_delay.as_secs(),
+            );
 
-                // Start task loop after the initial delay
-                warn!("Starting task {task_name}");
-                loop {
-                    warn!("Loop for task {task_name}");
-                    let start = Instant::now();
-                    let task_name = task_name.clone();
-                    let task_name_2 = task_name.clone();
+            managed.next_run = Instant::now() + initial_delay;
+        }
 
-                    if {
-                        warn!("Lock for task {task_name}");
-                        let mut managed = managed_task.lock().await;
+        let start = Instant::now();
+        let tasks = self.tasks.clone();
+        loop {
+            debug!(
+                "Checking tasks at {:?}",
+                (Instant::now() - start).as_secs() % 1000
+            );
 
-                        // if it is already started, warn and skip
-                        if let Some(started_at) = managed.started_at() {
-                            debug!(
-                                "Skipping run for task {task_name} (previous run from {:?} not finished)",
-                                started_at
-                            );
-                            false
-                        } else {
-                            // Otherwise, mark it as running now
-                            managed.start();
-                            true
-                        }
-                    } {
-                        warn!("Running task {task_name}");
+            let tasks = tasks.lock().await;
+            for managed_task in tasks.iter() {
+                let mut managed = managed_task.lock().await;
+                let task_name = managed.task.name().to_owned();
+
+                let now = Instant::now();
+                let prev_run = managed.next_run;
+                if now >= prev_run {
+                    // if it is already started, warn and skip
+                    if let Some(started_at) = managed.started_at() {
+                        debug!(
+                            "Skipping run for task {task_name} (previous run from {:?} not finished)",
+                            started_at
+                        );
+                    } else {
+                        // Otherwise, mark it as running now, and schedule next run
+                        managed.start();
+                        let interval = managed.task.interval();
+                        managed.next_run = prev_run + interval;
+
+                        debug!("Spawning task {task_name}");
                         let managed_task = managed_task.clone();
                         spawn(async move {
+                            debug!("Running task {task_name}");
                             if let Err(e) = managed_task.lock().await.task.run().await {
                                 warn!("Error in task {task_name}: {e}");
                             }
                             managed_task.lock().await.stop();
                         });
                     }
-
-                    let run_time = Instant::now() - start;
-                    let remaining = task_interval - run_time;
-                    warn!(
-                        "Sleeping {} after {} for task {task_name_2}",
-                        remaining.as_millis(),
-                        run_time.as_millis()
-                    );
-                    sleep(remaining).await;
-                    warn!("Awake for task {task_name_2}");
                 }
-            });
+            }
 
-            handles.push(handle);
+            sleep(self.scheduler_tick).await;
         }
-
-        // Now we wait for all tasks (which in theory never finish)
-        join_all(handles).await;
     }
 
     pub async fn run_with_signal(&self) {

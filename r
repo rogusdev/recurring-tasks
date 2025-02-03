@@ -1,3 +1,3 @@
 #!/bin/bash
 cargo fmt
-cargo run --release -p db
+RUST_LOG=debug cargo run -p db

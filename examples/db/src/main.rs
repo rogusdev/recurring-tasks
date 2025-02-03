@@ -21,7 +21,7 @@ async fn main() {
 
     let pool = pg_pool().await.expect("Failed to get pg pool");
 
-    let task_manager = TaskManager::new();
+    let task_manager = TaskManager::default();
 
     task_manager
         .add(HeartbeatTask::new(Duration::from_secs(20)))
