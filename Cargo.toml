@@ -2,6 +2,11 @@
 name = "recurring-tasks"
 version = "1.0.0"
 edition = "2021"
+license = "MIT"
+description = "Define tasks and run them in an app forever, ala cronjobs. And don't run already/still running tasks."
+repository = "https://github.com/rogusdev/recurring-tasks"
+keywords = ["tasks", "jobs", "recurring", "periodic", "cronjob"]
+categories = ["asynchronous", "command-line-utilities"]
 
 [dependencies]
 async-trait = "0.1.86"
