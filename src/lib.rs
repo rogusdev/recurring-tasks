@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use tracing::{debug, warn};
 
@@ -22,7 +22,7 @@ pub trait AsyncTask: Send + Sync {
 struct ManagedTask {
     task: Arc<dyn AsyncTask>,
     started_at: Option<SystemTime>,
-    next_run: Instant,
+    next_run: SystemTime,
 }
 
 impl ManagedTask {
@@ -30,7 +30,7 @@ impl ManagedTask {
         Self {
             task,
             started_at: None,
-            next_run: Instant::now(),
+            next_run: SystemTime::now(),
         }
     }
 
@@ -51,7 +51,7 @@ impl ManagedTask {
 #[derive(Clone)]
 pub struct TaskManager {
     tasks: Arc<Mutex<Vec<Arc<Mutex<ManagedTask>>>>>,
-    /// How often should the manager check for new tasks to run
+    /// How often should the manager check for tasks to run
     scheduler_tick: Duration,
 }
 
@@ -87,28 +87,22 @@ impl TaskManager {
             let initial_delay = calculate_initial_delay(managed.task.interval());
 
             debug!(
-                "Starting task {} in {} s",
+                "Starting task {} in {} ms",
                 managed.task.name(),
-                initial_delay.as_secs(),
+                initial_delay.as_millis(),
             );
 
-            managed.next_run = Instant::now() + initial_delay;
+            managed.next_run = SystemTime::now() + initial_delay;
         }
 
-        let start = Instant::now();
         let tasks = self.tasks.clone();
         loop {
-            debug!(
-                "Checking tasks at {:?}",
-                (Instant::now() - start).as_secs() % 1000
-            );
-
             let tasks = tasks.lock().await;
             for managed_task in tasks.iter() {
                 let mut managed = managed_task.lock().await;
                 let task_name = managed.task.name().to_owned();
 
-                let now = Instant::now();
+                let now = SystemTime::now();
                 let prev_run = managed.next_run;
                 if now >= prev_run {
                     // if it is already started, warn and skip
@@ -121,9 +115,19 @@ impl TaskManager {
                         // Otherwise, mark it as running now, and schedule next run
                         managed.start();
                         let interval = managed.task.interval();
-                        managed.next_run = prev_run + interval;
+                        let next_run = prev_run + interval;
+                        // check if we are falling too far behind on the schedule
+                        managed.next_run = if next_run >= now {
+                            next_run
+                        } else {
+                            let diff = now.duration_since(next_run).unwrap();
+                            warn!(
+                                "Falling behind schedule on {task_name} by {} ms",
+                                diff.as_millis()
+                            );
+                            now + interval
+                        };
 
-                        debug!("Spawning task {task_name}");
                         let managed_task = managed_task.clone();
                         spawn(async move {
                             debug!("Running task {task_name}");
@@ -158,15 +162,15 @@ impl TaskManager {
 
 /// Calculates the initial delay to align with the next scheduled time
 fn calculate_initial_delay(interval: Duration) -> Duration {
-    let now = SystemTime::now()
+    let now_since_epoch = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap();
-    let interval_secs = interval.as_secs();
+    let interval_millis = interval.as_millis();
 
     // Calculate the next scheduled time
-    let next_scheduled_time = ((now.as_secs() / interval_secs) + 1) * interval_secs;
-    let next_scheduled_duration = Duration::from_secs(next_scheduled_time);
-
-    // Calculate the initial delay
-    next_scheduled_duration - now
+    // (millis are u128 and duration maxes at u64, so do u128 math before creating duration)
+    let next_scheduled_time =
+        ((now_since_epoch.as_millis() / interval_millis) + 1) * interval_millis;
+    let scheduled_from_now = next_scheduled_time - now_since_epoch.as_millis();
+    Duration::from_millis(scheduled_from_now as u64)
 }

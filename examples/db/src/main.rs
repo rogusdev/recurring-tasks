@@ -21,14 +21,14 @@ async fn main() {
 
     let pool = pg_pool().await.expect("Failed to get pg pool");
 
-    let task_manager = TaskManager::default();
+    let task_manager = TaskManager::new(200);
 
     task_manager
-        .add(HeartbeatTask::new(Duration::from_secs(20)))
+        .add(HeartbeatTask::new(Duration::from_millis(2000)))
         .await;
 
     task_manager
-        .add(QueryTask::new(Duration::from_secs(60), pool.clone()))
+        .add(QueryTask::new(Duration::from_millis(5000), pool.clone()))
         .await;
 
     task_manager.run_with_signal().await;

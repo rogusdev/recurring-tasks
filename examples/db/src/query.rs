@@ -14,7 +14,8 @@ pub struct QueryTask {
 
 impl QueryTask {
     pub fn new(interval: Duration, pool: Pool) -> Self {
-        let name = format!("Query at {interval:?}");
+        let name = format!("Query at {} ms", interval.as_millis());
+
         Self {
             name,
             interval,

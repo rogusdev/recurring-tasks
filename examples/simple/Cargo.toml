@@ -1,0 +1,10 @@
+[package]
+name = "simple"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+recurring-tasks = { path = "../../" }
+
+async-trait = "0.1.86"
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"] }

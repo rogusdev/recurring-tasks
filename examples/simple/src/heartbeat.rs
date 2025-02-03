@@ -1,25 +1,17 @@
-use std::time::{Duration, SystemTime};
-
-use tracing::info;
+use std::time::Duration;
 
 use recurring_tasks::AsyncTask;
 
 pub struct HeartbeatTask {
     name: String,
     interval: Duration,
-    started: SystemTime,
 }
 
 impl HeartbeatTask {
     pub fn new(interval: Duration) -> Self {
         let name = format!("Heartbeat at {} ms", interval.as_millis());
-        let started = SystemTime::now();
 
-        Self {
-            name,
-            interval,
-            started,
-        }
+        Self { name, interval }
     }
 }
 
@@ -34,12 +26,7 @@ impl AsyncTask for HeartbeatTask {
     }
 
     async fn run(&self) -> Result<(), String> {
-        let elapsed = self
-            .started
-            .elapsed()
-            .map_err(|e| format!("Time went backwards: {e}"))?;
-
-        info!("{}: {}", self.name, elapsed.as_secs() % 100);
+        println!("{}", self.name);
 
         Ok(())
     }
