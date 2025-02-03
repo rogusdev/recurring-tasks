@@ -24,11 +24,11 @@ async fn main() {
     let task_manager = TaskManager::new(200);
 
     task_manager
-        .add(HeartbeatTask::new(Duration::from_millis(2000)))
+        .add(HeartbeatTask::new(Duration::from_millis(20000)))
         .await;
 
     task_manager
-        .add(QueryTask::new(Duration::from_millis(5000), pool.clone()))
+        .add(QueryTask::new(Duration::from_millis(50000), pool.clone()))
         .await;
 
     task_manager.run_with_signal().await;
