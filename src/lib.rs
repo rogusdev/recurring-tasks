@@ -1,5 +1,10 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+
+#[cfg(test)]
+use mock_instant::global::SystemTime;
+#[cfg(not(test))]
+use std::time::SystemTime;
 
 use tracing::{debug, warn};
 
@@ -7,7 +12,9 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tokio::{select, signal, spawn};
 
-#[cfg(feature = "instant")]
+#[cfg(all(feature = "instant", test))]
+use mock_instant::global::Instant;
+#[cfg(all(feature = "instant", not(test)))]
 use std::time::Instant;
 
 #[cfg(feature = "instant")]
@@ -57,9 +64,10 @@ pub trait AsyncTask: Send + Sync {
     /// The offset for this task to start at, relative to the interval
     /// e.g. interval of 60 min, offset of 30 min,
     /// should start at the bottom of the hour rather than top (but still every 60 min apart)
+    /// and interval 60, offset 15 will start quarter past, always
     /// defaults to no offset
     fn offset(&self) -> Duration {
-        Duration::from_secs(0)
+        Duration::ZERO
     }
 }
 
@@ -217,19 +225,100 @@ impl TaskManager {
 }
 
 /// Calculates the initial delay to align with the next scheduled time
+/// panics if offset is >= interval!
 fn calculate_initial_delay(interval: Duration, offset: Duration) -> Duration {
     let now_since_epoch_millis = now_since_epoch_millis();
     let interval_millis = interval.as_millis();
     let offset_millis = offset.as_millis();
 
+    if offset_millis >= interval_millis {
+        panic!("Offset must be strictly less than interval!");
+    }
+
     // Calculate the next scheduled time
     // (millis are u128 and duration maxes at u64, so do u128 math before creating duration)
-    let next_scheduled_time = ((now_since_epoch_millis / interval_millis) + 1) * interval_millis;
-    // check if offset puts this closer or farther
-    let scheduled_from_now = if next_scheduled_time - offset_millis > now_since_epoch_millis {
-        next_scheduled_time - offset_millis - now_since_epoch_millis
+    let next_scheduled_time =
+        (now_since_epoch_millis / interval_millis) * interval_millis + offset_millis;
+    // check if offset puts this earlier or later
+    let scheduled_from_now = if next_scheduled_time > now_since_epoch_millis {
+        next_scheduled_time - now_since_epoch_millis
     } else {
-        next_scheduled_time + offset_millis - now_since_epoch_millis
+        next_scheduled_time + interval_millis - now_since_epoch_millis
     };
     Duration::from_millis(scheduled_from_now as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use mock_instant::global::MockClock;
+
+    use super::*;
+
+    #[test]
+    fn half_offset() {
+        let interval = Duration::from_secs(60);
+        let offset = Duration::from_secs(30);
+
+        MockClock::set_system_time(Duration::from_secs(0));
+        let delay = calculate_initial_delay(interval, offset);
+        assert_eq!(delay, offset, "0 is offset");
+
+        MockClock::set_system_time(offset);
+        let delay = calculate_initial_delay(interval, offset);
+        assert_eq!(delay, interval, "offset is interval");
+
+        let diff = Duration::from_secs(15);
+        MockClock::set_system_time(offset - diff);
+        let delay = calculate_initial_delay(interval, offset);
+        assert_eq!(delay, diff, "less than offset is offset remainder");
+
+        let diff = Duration::from_secs(15);
+        MockClock::set_system_time(offset + diff);
+        let delay = calculate_initial_delay(interval, offset);
+        assert_eq!(
+            delay,
+            interval - diff,
+            "more than offset is interval remainder"
+        );
+    }
+
+    #[test]
+    fn quarter_offset() {
+        let interval = Duration::from_secs(60);
+        let offset = Duration::from_secs(15);
+
+        MockClock::set_system_time(Duration::from_secs(0));
+        let delay = calculate_initial_delay(interval, offset);
+        assert_eq!(delay, offset, "0 is offset");
+
+        MockClock::set_system_time(offset);
+        let delay = calculate_initial_delay(interval, offset);
+        assert_eq!(delay, interval, "offset is interval");
+
+        let diff = Duration::from_secs(5);
+        MockClock::set_system_time(offset - diff);
+        let delay = calculate_initial_delay(interval, offset);
+        assert_eq!(delay, diff, "less than offset is offset remainder");
+
+        let diff = Duration::from_secs(15);
+        MockClock::set_system_time(offset + diff);
+        let delay = calculate_initial_delay(interval, offset);
+        assert_eq!(
+            delay,
+            interval - diff,
+            "more than offset is interval remainder"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Offset must be strictly less than interval!")]
+    fn offset_match_interval() {
+        calculate_initial_delay(Duration::from_secs(60), Duration::from_secs(60));
+    }
+
+    #[test]
+    #[should_panic(expected = "Offset must be strictly less than interval!")]
+    fn offset_exceed_interval() {
+        calculate_initial_delay(Duration::from_secs(60), Duration::from_secs(90));
+    }
 }
