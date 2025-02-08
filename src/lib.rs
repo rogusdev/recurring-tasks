@@ -180,12 +180,15 @@ pub struct TaskManager {
 }
 
 impl Default for TaskManager {
+    /// Defaults to 500 ms for checking for tasks to run
     fn default() -> Self {
         Self::new(500)
     }
 }
 
 impl TaskManager {
+    /// Specify the ms for frequency/interval of checking for tasks to run
+    /// Also consider `::default()` for a sensible default for tasks on intervals of seconds and above
     pub fn new(millis: u64) -> Self {
         TaskManager {
             tasks: Arc::new(Mutex::new(Vec::new())),
