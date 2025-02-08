@@ -28,7 +28,11 @@ async fn main() {
         .await;
 
     task_manager
-        .add(QueryTask::new(Duration::from_millis(50000), pool.clone()))
+        .add(QueryTask::new(
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            pool.clone(),
+        ))
         .await;
 
     task_manager.run_with_signal().await;

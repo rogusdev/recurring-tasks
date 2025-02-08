@@ -9,16 +9,18 @@ use recurring_tasks::AsyncTask;
 pub struct QueryTask {
     name: String,
     interval: Duration,
+    offset: Duration,
     pool: Pool,
 }
 
 impl QueryTask {
-    pub fn new(interval: Duration, pool: Pool) -> Self {
+    pub fn new(interval: Duration, offset: Duration, pool: Pool) -> Self {
         let name = format!("Query at {} ms", interval.as_millis());
 
         Self {
             name,
             interval,
+            offset,
             pool,
         }
     }
@@ -32,6 +34,10 @@ impl AsyncTask for QueryTask {
 
     fn interval(&self) -> Duration {
         self.interval
+    }
+
+    fn offset(&self) -> Duration {
+        self.offset
     }
 
     async fn run(&self) -> Result<(), String> {

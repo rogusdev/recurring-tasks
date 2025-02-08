@@ -1,6 +1,6 @@
 [package]
 name = "recurring-tasks"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 description = "Define tasks and run them in an app forever, ala cronjobs. And don't run already/still running tasks."

@@ -47,12 +47,20 @@ fn duration_since(now: RunTimer, old: RunTimer) -> Duration {
 /// Trait for tasks that can be run asynchronously, with the Task Manager
 #[async_trait::async_trait]
 pub trait AsyncTask: Send + Sync {
-    /// The actual async task / work
+    /// The actual async task / work / job
     async fn run(&self) -> Result<(), String>;
-    /// A name for logging
+    /// A name for logging -- recommended to be unique per task instance,
+    /// in case of running multiple instances with different parameters
     fn name(&self) -> &str;
-    /// The period/interval for this task to run on
+    /// The period/interval for this task to run on (e.g. every 60 minutes)
     fn interval(&self) -> Duration;
+    /// The offset for this task to start at, relative to the interval
+    /// e.g. interval of 60 min, offset of 30 min,
+    /// should start at the bottom of the hour rather than top (but still every 60 min apart)
+    /// defaults to no offset
+    fn offset(&self) -> Duration {
+        Duration::from_secs(0)
+    }
 }
 
 /// Holds a single user task, when it started (if running), and when it should next run
@@ -131,7 +139,8 @@ impl TaskManager {
         for managed_task in self.tasks.lock().await.iter() {
             let mut managed = managed_task.lock().await;
 
-            let initial_delay = calculate_initial_delay(managed.task.interval());
+            let initial_delay =
+                calculate_initial_delay(managed.task.interval(), managed.task.offset());
 
             debug!(
                 "Starting task {} in {} ms",
@@ -208,13 +217,19 @@ impl TaskManager {
 }
 
 /// Calculates the initial delay to align with the next scheduled time
-fn calculate_initial_delay(interval: Duration) -> Duration {
+fn calculate_initial_delay(interval: Duration, offset: Duration) -> Duration {
     let now_since_epoch_millis = now_since_epoch_millis();
     let interval_millis = interval.as_millis();
+    let offset_millis = offset.as_millis();
 
     // Calculate the next scheduled time
     // (millis are u128 and duration maxes at u64, so do u128 math before creating duration)
     let next_scheduled_time = ((now_since_epoch_millis / interval_millis) + 1) * interval_millis;
-    let scheduled_from_now = next_scheduled_time - now_since_epoch_millis;
+    // check if offset puts this closer or farther
+    let scheduled_from_now = if next_scheduled_time - offset_millis > now_since_epoch_millis {
+        next_scheduled_time - offset_millis - now_since_epoch_millis
+    } else {
+        next_scheduled_time + offset_millis - now_since_epoch_millis
+    };
     Duration::from_millis(scheduled_from_now as u64)
 }
