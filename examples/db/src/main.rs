@@ -24,15 +24,20 @@ async fn main() {
     let task_manager = TaskManager::new(200);
 
     task_manager
-        .add(HeartbeatTask::new(Duration::from_millis(20000)))
+        .add(
+            "Heartbeat every 20 s",
+            Duration::from_millis(20000),
+            HeartbeatTask::new(),
+        )
         .await;
 
     task_manager
-        .add(QueryTask::new(
+        .add_offset(
+            "Query every minute at the bottom",
             Duration::from_secs(60),
             Duration::from_secs(30),
-            pool.clone(),
-        ))
+            QueryTask::new(pool.clone()),
+        )
         .await;
 
     task_manager.run_with_signal().await;

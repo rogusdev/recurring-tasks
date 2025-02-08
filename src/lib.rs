@@ -8,43 +8,12 @@
 //!
 //! use recurring_tasks::{AsyncTask, TaskManager};
 //!
-//! pub struct HeartbeatTask {
-//!     name: String,
-//!     interval: Duration,
-//!     started: SystemTime,
-//! }
-//!
-//! impl HeartbeatTask {
-//!     pub fn new(interval: Duration) -> Self {
-//!         let name = format!("Heartbeat at {} ms", interval.as_millis());
-//!         let started = SystemTime::now();
-//!
-//!         Self {
-//!             name,
-//!             interval,
-//!             started,
-//!         }
-//!     }
-//! }
+//! pub struct HeartbeatTask;
 //!
 //! #[async_trait::async_trait]
 //! impl AsyncTask for HeartbeatTask {
-//!     fn name(&self) -> &str {
-//!         &self.name
-//!     }
-//!
-//!     fn interval(&self) -> Duration {
-//!         self.interval
-//!     }
-//!
 //!     async fn run(&self) -> Result<(), String> {
-//!         let elapsed = self
-//!             .started
-//!             .elapsed()
-//!             .map_err(|e| format!("Time went backwards: {e}"))?;
-//!
-//!         info!("{}: {}", self.name, elapsed.as_secs() % 100);
-//!
+//!         info!("Heartbeat");
 //!         Ok(())
 //!     }
 //! }
@@ -53,8 +22,9 @@
 //! async fn main() {
 //!     let task_manager = TaskManager::default();
 //!
+//!     // run a heartbeat task every 5 seconds
 //!     task_manager
-//!         .add(HeartbeatTask::new(Duration::from_secs(5)))
+//!         .add("Heartbeat", Duration::from_secs(5), HeartbeatTask {})
 //!         .await;
 //!
 //!     // this will run until ctl-c! not suitable for a cargo test example ;)
@@ -127,31 +97,25 @@ fn duration_since(now: RunTimer, old: RunTimer) -> Duration {
 pub trait AsyncTask: Send + Sync {
     /// The actual async task / work / job
     async fn run(&self) -> Result<(), String>;
-    /// A name for logging -- recommended to be unique per task instance,
-    /// in case of running multiple instances with different parameters
-    fn name(&self) -> &str;
-    /// The period/interval for this task to run on (e.g. every 60 minutes)
-    fn interval(&self) -> Duration;
-    /// The offset for this task to start at, relative to the interval
-    /// e.g. interval of 60 min, offset of 30 min,
-    /// should start at the bottom of the hour rather than top (but still every 60 min apart)
-    /// and interval 60, offset 15 will start quarter past, always
-    /// defaults to no offset
-    fn offset(&self) -> Duration {
-        Duration::ZERO
-    }
 }
 
 /// Holds a single user task, when it started (if running), and when it should next run
 struct ManagedTask {
+    name: String,
+    interval: Duration,
+    offset: Duration,
+
     task: Arc<dyn AsyncTask>,
     started_at: Option<RunTimer>,
     next_run: RunTimer,
 }
 
 impl ManagedTask {
-    fn new(task: Arc<dyn AsyncTask>) -> Self {
+    fn new(name: String, interval: Duration, offset: Duration, task: Arc<dyn AsyncTask>) -> Self {
         Self {
+            name,
+            interval,
+            offset,
             task,
             started_at: None,
             next_run: run_timer_now(),
@@ -171,7 +135,7 @@ impl ManagedTask {
     }
 }
 
-/// Task manager that schedules and runs tasks
+/// Task manager that schedules and runs tasks on schedule, indefinitely
 #[derive(Clone)]
 pub struct TaskManager {
     tasks: Arc<Mutex<Vec<Arc<Mutex<ManagedTask>>>>>,
@@ -196,16 +160,55 @@ impl TaskManager {
         }
     }
 
-    pub async fn add<T>(&self, task: T)
+    /// Add a task to be run periodically on an interval, without an offset
+    ///
+    /// * `name` - Unique, descriptive name for debug + error logging
+    /// * `interval` - The period / frequency at which this task will run
+    /// * `task` - The actual task / job / work that will be run on the interval
+    ///
+    /// To explain interval, consider 3 examples:
+    /// - Interval 30 seconds == task will run every half minute (00:00:30, 00:01:00, 00:01:30...)
+    /// - Interval  3,600 seconds (60 minutes) == task will run at the top of the hour (02:00:00, 03:00:00, 04:00:00...)
+    /// - Interval 86,400 seconds (1 day / 24 hours) == task will run at midnight every day (00:00:00)
+    ///
+    /// This system runs on time passing only (with default features) and should be unaffected by any daylight savings times,
+    /// although the starting runs of all tasks do initialize based on current system clock, whatever timezone that is
+    pub async fn add<T>(&self, name: &str, interval: Duration, task: T)
     where
         T: AsyncTask + 'static,
     {
+        self.add_offset(name, interval, Duration::ZERO, task).await
+    }
+
+    /// Add a task to be run periodically on an interval, with an offset
+    ///
+    /// * `name` - Unique, descriptive name for debug + error logging
+    /// * `interval` - The period / frequency at which this task will run
+    /// * `offset` - The offset at which this interval will begin
+    /// * `task` - The actual task / job / work that will be run on the interval
+    ///
+    /// To explain offset, consider 3 examples, all with an interval of 60 minutes (1 hour):
+    /// - Offset not provided (0) == task will run at the top of the hour (2:00, 3:00, 4:00...)
+    /// - Offset 30 min == task will run at half past the hour every hour (2:30, 3:30, 4:30...)
+    /// - Offset 15 min == task will run at quarter past the hour every hour (2:15, 3:15, 4:15...)
+    pub async fn add_offset<T>(&self, name: &str, interval: Duration, offset: Duration, task: T)
+    where
+        T: AsyncTask + 'static,
+    {
+        if interval == Duration::ZERO {
+            panic!("Interval must be nonzero!");
+        }
+        if offset >= interval {
+            panic!("Offset must be strictly less than interval!");
+        }
+
         let mut tasks = self.tasks.lock().await;
 
-        let managed = ManagedTask::new(Arc::new(task));
+        let managed = ManagedTask::new(name.to_owned(), interval, offset, Arc::new(task));
         tasks.push(Arc::new(Mutex::new(managed)));
     }
 
+    /// Run the tasks in the task manager on schedule until the process dies
     pub async fn run(&self) {
         debug!(
             "Initializing Recurring Tasks Manager using {}",
@@ -221,12 +224,11 @@ impl TaskManager {
         for managed_task in self.tasks.lock().await.iter() {
             let mut managed = managed_task.lock().await;
 
-            let initial_delay =
-                calculate_initial_delay(managed.task.interval(), managed.task.offset());
+            let initial_delay = calculate_initial_delay(managed.interval, managed.offset);
 
             debug!(
                 "Starting task {} in {} ms",
-                managed.task.name(),
+                managed.name,
                 initial_delay.as_millis(),
             );
 
@@ -238,7 +240,7 @@ impl TaskManager {
             let tasks = tasks.lock().await;
             for managed_task in tasks.iter() {
                 let mut managed = managed_task.lock().await;
-                let task_name = managed.task.name().to_owned();
+                let task_name = managed.name.clone();
 
                 let now = run_timer_now();
                 let prev_run = managed.next_run;
@@ -252,7 +254,7 @@ impl TaskManager {
                     } else {
                         // Otherwise, mark it as running now, and schedule next run
                         managed.start();
-                        let interval = managed.task.interval();
+                        let interval = managed.interval;
                         let next_run = prev_run + interval;
                         // check if we are falling too far behind on the schedule
                         managed.next_run = if next_run >= now {
@@ -282,6 +284,7 @@ impl TaskManager {
         }
     }
 
+    /// Run the tasks in the task manager on schedule until the process is interrupted with ctl-c
     pub async fn run_with_signal(&self) {
         let manager = self.clone();
 
@@ -299,15 +302,12 @@ impl TaskManager {
 }
 
 /// Calculates the initial delay to align with the next scheduled time
-/// panics if offset is >= interval!
+///
+/// NOTE: TaskManager verifies that intervals are all strictly greater than offsets
 fn calculate_initial_delay(interval: Duration, offset: Duration) -> Duration {
     let now_since_epoch_millis = now_since_epoch_millis();
     let interval_millis = interval.as_millis();
     let offset_millis = offset.as_millis();
-
-    if offset_millis >= interval_millis {
-        panic!("Offset must be strictly less than interval!");
-    }
 
     // Calculate the next scheduled time
     // (millis are u128 and duration maxes at u64, so do u128 math before creating duration)
@@ -327,6 +327,15 @@ mod tests {
     use mock_instant::global::MockClock;
 
     use super::*;
+
+    pub struct TestTask;
+
+    #[async_trait::async_trait]
+    impl AsyncTask for TestTask {
+        async fn run(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn half_offset() {
@@ -384,15 +393,37 @@ mod tests {
         );
     }
 
-    #[test]
-    #[should_panic(expected = "Offset must be strictly less than interval!")]
-    fn offset_match_interval() {
-        calculate_initial_delay(Duration::from_secs(60), Duration::from_secs(60));
+    #[tokio::test]
+    #[should_panic(expected = "Interval must be nonzero!")]
+    async fn interval_nonzero() {
+        TaskManager::default()
+            .add("Fails", Duration::from_secs(0), TestTask {})
+            .await;
     }
 
-    #[test]
+    #[tokio::test]
     #[should_panic(expected = "Offset must be strictly less than interval!")]
-    fn offset_exceed_interval() {
-        calculate_initial_delay(Duration::from_secs(60), Duration::from_secs(90));
+    async fn offset_match_interval() {
+        TaskManager::default()
+            .add_offset(
+                "Fails",
+                Duration::from_secs(10),
+                Duration::from_secs(10),
+                TestTask {},
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Offset must be strictly less than interval!")]
+    async fn offset_exceed_interval() {
+        TaskManager::default()
+            .add_offset(
+                "Fails",
+                Duration::from_secs(10),
+                Duration::from_secs(20),
+                TestTask {},
+            )
+            .await;
     }
 }
