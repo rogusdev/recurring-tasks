@@ -1,3 +1,74 @@
+//! Scheduled async tasks / jobs manager to run forever, but not run jobs if already/still running
+//!
+//! Simple example:
+//! ```
+//! use std::time::{Duration, SystemTime};
+//!
+//! use tracing::info;
+//!
+//! use recurring_tasks::{AsyncTask, TaskManager};
+//!
+//! pub struct HeartbeatTask {
+//!     name: String,
+//!     interval: Duration,
+//!     started: SystemTime,
+//! }
+//!
+//! impl HeartbeatTask {
+//!     pub fn new(interval: Duration) -> Self {
+//!         let name = format!("Heartbeat at {} ms", interval.as_millis());
+//!         let started = SystemTime::now();
+//!
+//!         Self {
+//!             name,
+//!             interval,
+//!             started,
+//!         }
+//!     }
+//! }
+//!
+//! #[async_trait::async_trait]
+//! impl AsyncTask for HeartbeatTask {
+//!     fn name(&self) -> &str {
+//!         &self.name
+//!     }
+//!
+//!     fn interval(&self) -> Duration {
+//!         self.interval
+//!     }
+//!
+//!     async fn run(&self) -> Result<(), String> {
+//!         let elapsed = self
+//!             .started
+//!             .elapsed()
+//!             .map_err(|e| format!("Time went backwards: {e}"))?;
+//!
+//!         info!("{}: {}", self.name, elapsed.as_secs() % 100);
+//!
+//!         Ok(())
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let task_manager = TaskManager::default();
+//!
+//!     task_manager
+//!         .add(HeartbeatTask::new(Duration::from_secs(5)))
+//!         .await;
+//!
+//!     // this will run until ctl-c! not suitable for a cargo test example ;)
+//!     //task_manager.run_with_signal().await;
+//!     println!("Shutdown");
+//! }
+//! ```
+//!
+//! For a fancier example, see the repo: [db query task](https://github.com/rogusdev/recurring-tasks/blob/main/examples/db/src/main.rs)
+//!
+//! This crate is intended to be very direct and specific. For a more elaborate scheduling crate,
+//! using crontab syntax, consider [tokio-cron-scheduler](https://github.com/mvniekerk/tokio-cron-scheduler).
+//! There are also a variety of additional alternatives out there, each with different priorities.
+
 use std::sync::Arc;
 use std::time::Duration;
 
