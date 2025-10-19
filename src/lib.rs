@@ -42,16 +42,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tracing::{debug, error, warn};
+
+use tokio::sync::Mutex;
+use tokio::time::{sleep, timeout};
+use tokio::{select, spawn};
+use tokio_util::sync::CancellationToken;
+
 #[cfg(test)]
 use mock_instant::global::SystemTime;
 #[cfg(not(test))]
 use std::time::SystemTime;
-
-use tracing::{debug, warn};
-
-use tokio::sync::Mutex;
-use tokio::time::sleep;
-use tokio::{select, signal, spawn};
 
 #[cfg(all(feature = "instant", test))]
 use mock_instant::global::Instant;
@@ -63,6 +64,8 @@ type RunTimer = Instant;
 
 #[cfg(feature = "system")]
 type RunTimer = SystemTime;
+
+const DEFAULT_TICK_MILLIS: u64 = 500;
 
 // Instant has no concept of time, so to get starting millis, we still need SystemTime, but just once at the start
 fn now_since_epoch_millis() -> u128 {
@@ -146,12 +149,12 @@ pub struct TaskManager {
 impl Default for TaskManager {
     /// Defaults to 500 ms for checking for tasks to run
     fn default() -> Self {
-        Self::new(500)
+        Self::new(DEFAULT_TICK_MILLIS)
     }
 }
 
 impl TaskManager {
-    /// Specify the ms for frequency/interval of checking for tasks to run
+    /// Specify the tick ms for frequency/interval of checking for tasks to run
     /// Also consider `::default()` for a sensible default for tasks on intervals of seconds and above
     pub fn new(millis: u64) -> Self {
         TaskManager {
@@ -202,14 +205,18 @@ impl TaskManager {
             panic!("Offset must be strictly less than interval!");
         }
 
-        let mut tasks = self.tasks.lock().await;
-
         let managed = ManagedTask::new(name.to_owned(), interval, offset, Arc::new(task));
+        let mut tasks = self.tasks.lock().await;
         tasks.push(Arc::new(Mutex::new(managed)));
     }
 
     /// Run the tasks in the task manager on schedule until the process dies
     pub async fn run(&self) {
+        self.run_with_cancel(CancellationToken::new()).await
+    }
+
+    /// Run the tasks in the task manager on schedule until cancelled
+    pub async fn run_with_cancel(&self, cancel: CancellationToken) {
         debug!(
             "Initializing Recurring Tasks Manager using {}",
             if cfg!(feature = "instant") {
@@ -280,24 +287,69 @@ impl TaskManager {
                 }
             }
 
-            sleep(self.scheduler_tick).await;
+            select! {
+                _ = sleep(self.scheduler_tick) => {}
+                _ = cancel.cancelled() => {
+                    debug!("Cancelled Recurring Tasks Manager loop");
+                    break;
+                }
+            }
         }
     }
 
-    /// Run the tasks in the task manager on schedule until the process is interrupted with ctl-c
-    pub async fn run_with_signal(&self) {
-        let manager = self.clone();
+    /// Run the tasks in the task manager on schedule until the process is interrupted
+    pub async fn run_with_signal(self) {
+        let cancel = CancellationToken::new();
 
-        let run_handle = spawn(async move {
-            manager.run().await;
+        let mut handle = spawn({
+            let cancel = cancel.child_token();
+            async move {
+                self.run_with_cancel(cancel).await;
+            }
         });
 
         select! {
-            _ = signal::ctrl_c() => {
-                warn!("Ctrl+C received, shutting down recurring tasks...");
+            res = &mut handle => {
+                error!("Manager stopped unexpectedly: {res:?}")
             }
-            _ = run_handle => {}
+            _ = shutdown_signal() => {
+                warn!("Shutdown signal received, stopping recurring tasks...");
+                // tell manager tasks loop to stop
+                cancel.cancel();
+                // give tasks some time to finish gracefully
+                match timeout(Duration::from_secs(20), &mut handle).await {
+                    Ok(_) => debug!("Shutdown complete"),
+                    Err(_) => {
+                        warn!("Aborting tasks after timeout");
+                        handle.abort();
+                        // wait to finish abort -- process will be killed if this takes too long
+                        let _ = handle.await;
+                    }
+                }
+            }
         }
+    }
+}
+
+async fn shutdown_signal() {
+    let sigint = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let sigterm = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut s) = signal(SignalKind::terminate()) {
+            s.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = sigint  => {},
+        _ = sigterm => {},
     }
 }
 
@@ -324,15 +376,48 @@ fn calculate_initial_delay(interval: Duration, offset: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Once;
+
     use mock_instant::global::MockClock;
 
     use super::*;
 
-    pub struct TestTask;
+    static INIT: Once = Once::new();
+
+    /// init_logging() called at start of any test fn while debugging with logs
+    #[allow(unused)]
+    pub fn init_logging() {
+        use tracing_subscriber::{EnvFilter, fmt};
+
+        INIT.call_once(|| {
+            let filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+            fmt().with_env_filter(filter).with_test_writer().init();
+        });
+    }
+
+    #[derive(Clone)]
+    pub struct TestTask {
+        count: Arc<Mutex<usize>>,
+    }
+
+    impl TestTask {
+        pub fn new() -> Self {
+            Self {
+                count: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        pub async fn count(&self) -> usize {
+            *self.count.lock().await
+        }
+    }
 
     #[async_trait::async_trait]
     impl AsyncTask for TestTask {
         async fn run(&self) -> Result<(), String> {
+            let mut count = self.count.lock().await;
+            *count += 1;
             Ok(())
         }
     }
@@ -397,7 +482,7 @@ mod tests {
     #[should_panic(expected = "Interval must be nonzero!")]
     async fn interval_nonzero() {
         TaskManager::default()
-            .add("Fails", Duration::from_secs(0), TestTask {})
+            .add("Fails", Duration::from_secs(0), TestTask::new())
             .await;
     }
 
@@ -409,7 +494,7 @@ mod tests {
                 "Fails",
                 Duration::from_secs(10),
                 Duration::from_secs(10),
-                TestTask {},
+                TestTask::new(),
             )
             .await;
     }
@@ -422,8 +507,55 @@ mod tests {
                 "Fails",
                 Duration::from_secs(10),
                 Duration::from_secs(20),
-                TestTask {},
+                TestTask::new(),
             )
             .await;
+    }
+
+    #[tokio::test]
+    async fn run_cancelled() {
+        // init_logging();
+        let manager = TaskManager::new(50);
+        let task = TestTask::new();
+
+        MockClock::set_system_time(Duration::from_secs(0));
+        manager
+            .add("Test", Duration::from_millis(100), task.clone())
+            .await;
+
+        let cancel = CancellationToken::new();
+
+        let mut run = spawn({
+            let cancel = cancel.clone();
+            async move { manager.run_with_cancel(cancel).await }
+        });
+
+        let mut test = spawn({
+            let cancel = cancel.clone();
+            async move {
+                MockClock::set_system_time(Duration::from_millis(120));
+                sleep(Duration::from_millis(100)).await;
+                assert_eq!(task.count().await, 1);
+                MockClock::set_system_time(Duration::from_millis(220));
+                sleep(Duration::from_millis(100)).await;
+                assert_eq!(task.count().await, 2);
+
+                cancel.cancel();
+                sleep(Duration::from_millis(200)).await;
+                panic!("Cancel did not stop manager");
+            }
+        });
+
+        select! {
+            res = &mut run => {
+                if res.is_err() || !cancel.is_cancelled() {
+                    panic!("Manager stopped unexpectedly: {res:?}");
+                }
+            }
+            res = &mut test => {
+                run.abort();
+                res.unwrap();
+            }
+        }
     }
 }
