@@ -24,4 +24,4 @@ instant = []
 system = []
 
 [workspace]
-members = ["examples/db", "examples/simple"]
+members = ["apps/*"]

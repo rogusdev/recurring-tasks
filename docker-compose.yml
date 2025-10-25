@@ -1,0 +1,9 @@
+services:
+  simple:
+    environment:
+      - RUST_LOG=DEBUG
+    build:
+      context: .
+      dockerfile: apps/simple/Dockerfile
+      args:
+        APP_NAME: simple

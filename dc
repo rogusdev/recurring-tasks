@@ -1,0 +1,7 @@
+#!/bin/bash
+export TEMP_PASSWORD=$(tr -dc A-Za-z0-9_ < /dev/urandom | head -c 16)
+
+docker compose up -d --build
+# comment out the `_ = sigterm => {},` line in lib.shutdown_signal()
+# and this container will take an extra 10 seconds to shutdown vs with it
+time docker compose stop

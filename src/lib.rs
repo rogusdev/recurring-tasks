@@ -33,7 +33,7 @@
 //! }
 //! ```
 //!
-//! For a fancier example, see the repo: [db query task](https://github.com/rogusdev/recurring-tasks/blob/main/examples/db/src/main.rs)
+//! For a fancier example, see the repo: [db query task](https://github.com/rogusdev/recurring-tasks/blob/main/apps/db/src/main.rs)
 //!
 //! This crate is intended to be very direct and specific. For a more elaborate scheduling crate,
 //! using crontab syntax, consider [tokio-cron-scheduler](https://github.com/mvniekerk/tokio-cron-scheduler).
@@ -216,6 +216,8 @@ impl TaskManager {
     }
 
     /// Run the tasks in the task manager on schedule until cancelled
+    ///
+    /// * `cancel` - token to cancel() to stop the manager/loop
     pub async fn run_with_cancel(&self, cancel: CancellationToken) {
         debug!(
             "Initializing Recurring Tasks Manager using {}",
@@ -532,6 +534,7 @@ mod tests {
 
         let mut test = spawn({
             let cancel = cancel.clone();
+
             async move {
                 MockClock::set_system_time(Duration::from_millis(120));
                 sleep(Duration::from_millis(100)).await;
@@ -541,7 +544,7 @@ mod tests {
                 assert_eq!(task.count().await, 2);
 
                 cancel.cancel();
-                sleep(Duration::from_millis(200)).await;
+                sleep(Duration::from_millis(100)).await;
                 panic!("Cancel did not stop manager");
             }
         });

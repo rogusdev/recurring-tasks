@@ -3,7 +3,7 @@ Rust crate to build an app that (simply) runs recurring, periodic tasks -- effec
 
 Can support sub-second periods, but runs the risk of falling behind, depending on the system / environment this runs on/in.
 
-Full, but easily digestible, examples are in the [examples dir](https://github.com/rogusdev/recurring-tasks/tree/main/examples/).
+Full, but easily digestible, examples are in the [apps dir](https://github.com/rogusdev/recurring-tasks/tree/main/apps/).
 
 This is designed to be a very focused solution for building an app that has only one job: running various tasks repeatedly, forever. Look at (not mine, just shoutout) [tokio-cron-scheduler crate](https://github.com/mvniekerk/tokio-cron-scheduler) for a much more elaborate approach, using crontab syntax.
 
