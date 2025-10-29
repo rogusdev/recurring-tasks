@@ -6,13 +6,13 @@
 //!
 //! use tracing::info;
 //!
-//! use recurring_tasks::{AsyncTask, TaskManager};
+//! use recurring_tasks::{AsyncTask, TaskManager, CancellationToken};
 //!
 //! pub struct HeartbeatTask;
 //!
 //! #[async_trait::async_trait]
 //! impl AsyncTask for HeartbeatTask {
-//!     async fn run(&self) -> Result<(), String> {
+//!     async fn run(&self, _cancel: CancellationToken) -> Result<(), String> {
 //!         info!("Heartbeat");
 //!         Ok(())
 //!     }
@@ -47,7 +47,7 @@ use tracing::{debug, error, warn};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 use tokio::{select, spawn};
-use tokio_util::sync::CancellationToken;
+pub use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 use mock_instant::global::SystemTime;
@@ -99,7 +99,11 @@ fn duration_since(now: RunTimer, old: RunTimer) -> Duration {
 #[async_trait::async_trait]
 pub trait AsyncTask: Send + Sync {
     /// The actual async task / work / job
-    async fn run(&self) -> Result<(), String>;
+    ///
+    /// * `cancel` - Tokio CancellationToken (re-exported by this crate) to stop a run
+    /// See query demo app for one example usage to interrupt async run operations.
+    /// This is a child token that can only cancel this one task run, not the entire loop.
+    async fn run(&self, cancel: CancellationToken) -> Result<(), String>;
 }
 
 /// Holds a single user task, when it started (if running), and when it should next run
@@ -278,9 +282,10 @@ impl TaskManager {
                         };
 
                         let managed_task = managed_task.clone();
+                        let cancel = cancel.child_token();
                         spawn(async move {
                             debug!("Running task {task_name}");
-                            if let Err(e) = managed_task.lock().await.task.run().await {
+                            if let Err(e) = managed_task.lock().await.task.run(cancel).await {
                                 warn!("Error in task {task_name}: {e}");
                             }
                             managed_task.lock().await.stop();
@@ -417,7 +422,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AsyncTask for TestTask {
-        async fn run(&self) -> Result<(), String> {
+        async fn run(&self, _cancel: CancellationToken) -> Result<(), String> {
             let mut count = self.count.lock().await;
             *count += 1;
             Ok(())
