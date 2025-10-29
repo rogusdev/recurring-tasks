@@ -27,6 +27,7 @@ impl AsyncTask for QueryTask {
 
         info!("Querying...");
         select! {
+            // OR: to test long running task: SELECT pg_sleep(50000)
             res = client.query("SELECT 1", &[]) => {
                 let rows: Vec<i32> = res
                     .map_err(|e| format!("Failed querying: {e}"))?

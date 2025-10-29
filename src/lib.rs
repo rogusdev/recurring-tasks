@@ -42,7 +42,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
@@ -223,7 +223,7 @@ impl TaskManager {
     ///
     /// * `cancel` - token to cancel() to stop the manager/loop
     pub async fn run_with_cancel(&self, cancel: CancellationToken) {
-        debug!(
+        info!(
             "Initializing Recurring Tasks Manager using {}",
             if cfg!(feature = "instant") {
                 "Instant"
@@ -239,7 +239,7 @@ impl TaskManager {
 
             let initial_delay = calculate_initial_delay(managed.interval, managed.offset);
 
-            debug!(
+            info!(
                 "Starting task {} in {} ms",
                 managed.name,
                 initial_delay.as_millis(),
@@ -285,7 +285,10 @@ impl TaskManager {
                         let cancel = cancel.child_token();
                         spawn(async move {
                             debug!("Running task {task_name}");
-                            if let Err(e) = managed_task.lock().await.task.run(cancel).await {
+                            // clone the Arc<task> to release the lock on the managed_task
+                            // otherwise a task running over period blocks the entire loop...
+                            let task = managed_task.lock().await.task.clone();
+                            if let Err(e) = task.run(cancel).await {
                                 warn!("Error in task {task_name}: {e}");
                             }
                             managed_task.lock().await.stop();
