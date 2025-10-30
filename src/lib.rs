@@ -197,20 +197,26 @@ impl TaskManager {
             );
 
             spawn(async move {
-                sleep(initial_delay).await;
-                let mut ticker = interval(managed.interval);
+                select! {
+                    _ = sleep(initial_delay) => {
+                        let mut ticker = interval(managed.interval);
 
-                loop {
-                    select! {
-                        _ = ticker.tick() => {
-                            let managed = managed.clone();
-                            let cancel = cancel.child_token();
-                            running = Self::task_spawn(managed, running, cancel).await;
+                        loop {
+                            select! {
+                                _ = ticker.tick() => {
+                                    let managed = managed.clone();
+                                    let cancel = cancel.child_token();
+                                    running = Self::task_spawn(managed, running, cancel).await;
+                                }
+                                _ = cancel.cancelled() => {
+                                    debug!("Cancelled Recurring Tasks Manager loop for '{}'", managed.name);
+                                    break;
+                                }
+                            }
                         }
-                        _ = cancel.cancelled() => {
-                            debug!("Cancelled Recurring Tasks Manager loop for '{}'", managed.name);
-                            break;
-                        }
+                    }
+                    _ = cancel.cancelled() => {
+                        debug!("Cancelled Recurring Tasks Manager sleep for '{}'", managed.name);
                     }
                 }
             })
@@ -452,6 +458,43 @@ mod tests {
                 sleep(Duration::from_millis(120)).await;
                 assert_eq!(task.count().await, 2);
 
+                cancel.cancel();
+                sleep(Duration::from_millis(120)).await;
+                panic!("Cancel did not stop manager");
+            }
+        });
+
+        select! {
+            res = &mut run => {
+                if res.is_err() || !cancel.is_cancelled() {
+                    panic!("Manager stopped unexpectedly: {res:?}");
+                }
+            }
+            res = &mut test => {
+                run.abort();
+                res.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_cancelled_early() {
+        // init_logging();
+        let mut manager = TaskManager::new();
+        let task = TestTask::new();
+        let cancel = CancellationToken::new();
+
+        manager.add("Test", Duration::from_millis(10000), task.clone());
+
+        let mut run = spawn({
+            let cancel = cancel.clone();
+            async move { manager.run_with_cancel(cancel).await }
+        });
+
+        let mut test = spawn({
+            let cancel = cancel.clone();
+
+            async move {
                 cancel.cancel();
                 sleep(Duration::from_millis(120)).await;
                 panic!("Cancel did not stop manager");
