@@ -2,7 +2,7 @@
 //!
 //! Simple example:
 //! ```
-//! use std::time::{Duration, SystemTime};
+//! use std::time::Duration;
 //!
 //! use tracing::info;
 //!
