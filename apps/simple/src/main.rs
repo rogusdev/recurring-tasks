@@ -16,6 +16,6 @@ async fn main() {
         HeartbeatTask {},
     );
 
-    task_manager.run_with_signal().await;
+    task_manager.run_with_signal(Duration::from_secs(10)).await;
     println!("Shutdown");
 }

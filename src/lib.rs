@@ -225,7 +225,9 @@ impl TaskManager {
     }
 
     /// Run the tasks in the task manager on schedule until the process is interrupted
-    pub async fn run_with_signal(self) {
+    ///
+    /// * `wait` - time to wait before forcing abort of tasks loop after signal (cancel)
+    pub async fn run_with_signal(self, wait: Duration) {
         let cancel = CancellationToken::new();
 
         let mut handle = spawn({
@@ -244,7 +246,7 @@ impl TaskManager {
                 // tell manager tasks loop to stop
                 cancel.cancel();
                 // give tasks some time to finish gracefully
-                match timeout(Duration::from_secs(20), &mut handle).await {
+                match timeout(wait, &mut handle).await {
                     Ok(_) => debug!("Shutdown complete"),
                     Err(_) => {
                         warn!("Aborting tasks after timeout");
